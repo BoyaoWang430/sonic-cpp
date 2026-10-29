@@ -467,8 +467,9 @@ TYPED_TEST(NodeTest, EraseMember) {
     EXPECT_TRUE(m->value.GetInt64() == i + 1);
   }
   {
+    ASSERT_EQ(1u, node1.Size());
     MemberIterator m =
-        node1.EraseMember(node1.MemberBegin(), node1.MemberBegin() + 1);
+        node1.EraseMember(node1.MemberBegin(), node1.MemberEnd());
     EXPECT_TRUE(m == node1.MemberEnd());
   }
 }

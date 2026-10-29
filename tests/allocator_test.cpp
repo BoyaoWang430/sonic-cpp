@@ -217,8 +217,9 @@ TEST(Stack, ConstructorOomLeavesConsistentState) {
   // (absent) buffer.  Otherwise Grow()'s guard `top_+cnt >= buf_+cap_` reads
   // as `1 >= cap_ + 0` and skips the re-allocation entirely, letting a
   // subsequent Push() dereference a null top_.
-  constexpr size_t kHuge = (size_t{1} << 62);
-  sonic_json::internal::Stack s(kHuge);
+  // Avoid constant-folding the growth path into an oversized allocation warning.
+  volatile size_t huge = (size_t{1} << 62);
+  sonic_json::internal::Stack s(huge);
 
   if (s.Begin<char>() == nullptr) {
     EXPECT_EQ(0u, s.Capacity())
