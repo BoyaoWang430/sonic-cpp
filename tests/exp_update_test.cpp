@@ -16,11 +16,63 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
+#include <string>
 #include <vector>
 
 #include "sonic/experiment/lazy_update.h"
 
 namespace {
+
+struct PoisonedKeyAllocator : sonic_json::SimpleAllocator {
+  void* Malloc(size_t size) {
+    void* ptr = SimpleAllocator::Malloc(size);
+    if (ptr) std::memset(ptr, '\x01', size);
+    return ptr;
+  }
+};
+
+TEST(UpdateLazy, EscapedKeysWithPoisonedAllocation) {
+  struct KeyCase {
+    std::string encoded;
+    std::string decoded;
+  };
+  const std::vector<KeyCase> cases = {
+      {R"(\n)", "\n"},
+      {R"(a\"b)", "a\"b"},
+      {R"(\u0000)", std::string(1, '\0')},
+      {R"(\u4e2d)", "\xe4\xb8\xad"},
+  };
+  for (size_t length : {0, 15, 16, 31, 32, 63, 64, 127}) {
+    const std::string prefix(length, 'x');
+    for (const auto& test : cases) {
+      SCOPED_TRACE(length);
+      SCOPED_TRACE(test.encoded);
+      const std::string json = "{\"" + prefix + test.encoded + "\":1}";
+      std::vector<uint8_t> input(json.begin(), json.end());
+      input.resize(json.size() + 64, 0);
+      const std::string expected = prefix + test.decoded;
+
+      PoisonedKeyAllocator alloc;
+      using Node = sonic_json::DNode<PoisonedKeyAllocator>;
+      Node node;
+      auto result = sonic_json::internal::ParseLazy<
+          Node, PoisonedKeyAllocator, ParseFlags::kParseDefault>(
+          node,
+          sonic_json::StringView(reinterpret_cast<const char*>(input.data()),
+                                 json.size()),
+          alloc);
+      ASSERT_EQ(sonic_json::kErrorNone, result.Error());
+      ASSERT_TRUE(node.IsObject());
+      ASSERT_EQ(1u, node.Size());
+      auto member = node.FindMember(
+          sonic_json::StringView(expected.data(), expected.size()));
+      ASSERT_NE(node.MemberEnd(), member);
+      ASSERT_TRUE(member->value.IsRaw());
+      EXPECT_EQ("1", member->value.GetRaw());
+    }
+  }
+}
 
 TEST(UpdateLazy, Basic) {
   struct UpdateJsonTest {

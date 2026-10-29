@@ -1098,7 +1098,8 @@ class Parser {
         return ParseResult(kErrorNoMem, pos);
       }
       sdst = dst;
-      std::memcpy(dst, src, sn);
+      // The in-place decoder needs the closing quote as its terminator.
+      std::memcpy(dst, src, sn + 1);
       sn = internal::parseStringInplace<parseFlags>(dst, err);
       if (err) {
         // update the error positions
