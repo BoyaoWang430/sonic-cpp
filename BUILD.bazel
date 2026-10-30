@@ -176,6 +176,18 @@ cc_binary(
     linkopts = filesystem_linkopts,
 )
 
+# Standalone full-parse / sparse-query benchmark; fixtures are loaded at runtime.
+cc_binary(
+    name = "business_benchmark",
+    srcs = ["benchmark/business.cpp"],
+    deps = [":sonic-cpp"],
+    copts = benchmark_copts + auto_arch_copts + macos_version_copts + select({
+        "static_dispatch": static_dispatch_copts,
+        "dynamic_dispatch": dynamic_dispatch_copts,
+    }),
+    linkopts = filesystem_linkopts,
+)
+
 cc_test(
     name = "unittest",
     srcs = glob([
