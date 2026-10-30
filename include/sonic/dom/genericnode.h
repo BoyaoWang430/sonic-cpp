@@ -1142,6 +1142,7 @@ class GenericNode {
  private:
   friend NodeType;
   friend class SAXHandler<NodeType>;
+  friend class internal::SAXWorkspaceHandler<NodeType>;
   friend class LazySAXHandler<NodeType>;
   friend class SchemaHandler<NodeType>;
 

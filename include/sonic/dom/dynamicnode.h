@@ -48,6 +48,7 @@ class DNode : public GenericNode<DNode<Allocator>> {
   using ConstValueIterator = typename NodeTraits<DNode>::ConstValueIterator;
 
   friend class SAXHandler<DNode>;
+  friend class internal::SAXWorkspaceHandler<DNode>;
   friend class LazySAXHandler<DNode>;
   friend class SchemaHandler<DNode>;
 

@@ -17,12 +17,14 @@
 #pragma once
 
 #include <algorithm>
+#include <limits>
 #include <type_traits>
 #include <utility>
 
 #include "sonic/dom/dynamicnode.h"
 #include "sonic/dom/json_pointer.h"
 #include "sonic/dom/parser.h"
+#include "sonic/internal/sax_workspace.h"
 
 namespace sonic_json {
 
@@ -143,6 +145,18 @@ class GenericDocument : public NodeType {
     return parseImpl<parseFlags>(data, len);
   }
 
+  // Reuse SAX storage across independent Documents.
+  template <ParseFlags parseFlags = ParseFlags::kParseDefault>
+  GenericDocument& Parse(StringView json, ParseWorkspace& workspace) {
+    return Parse<parseFlags>(json.data(), json.size(), workspace);
+  }
+
+  template <ParseFlags parseFlags = ParseFlags::kParseDefault>
+  GenericDocument& Parse(const char* data, size_t len, ParseWorkspace& workspace) {
+    destroyDom();
+    return parseImplWithWorkspace<parseFlags>(data, len, workspace);
+  }
+
   template <ParseFlags parseFlags = ParseFlags::kParseDefault>
   GenericDocument& ParseSchema(StringView json) {
     return ParseSchema<parseFlags>(json.data(), json.size());
@@ -231,6 +245,36 @@ class GenericDocument : public NodeType {
     Parser<parseFlags> p;
     SAXHandler<NodeType> sax(*alloc_);
     if (!sax.SetUp(StringView(json, len))) {
+      parse_result_ = kErrorNoMem;
+      return *this;
+    }
+    parse_result_ = allocateStringBuffer(json, len);
+    if (sonic_unlikely(HasParseError())) {
+      return *this;
+    }
+    parse_result_ = p.Parse(str_, len, sax);
+    if (sonic_unlikely(sax.oom_)) {
+      parse_result_ = kErrorNoMem;
+      return *this;
+    }
+    if (sonic_unlikely(HasParseError())) {
+      return *this;
+    }
+    NodeType::operator=(std::move(sax.st_[0]));
+    return *this;
+  }
+
+  template <ParseFlags parseFlags>
+  GenericDocument& parseImplWithWorkspace(const char* json, size_t len,
+                                        ParseWorkspace& workspace) {
+    if (sonic_unlikely(len > std::numeric_limits<size_t>::max() - 64)) {
+      parse_result_ = kErrorNoMem;
+      return *this;
+    }
+    Parser<parseFlags> p;
+    internal::SAXWorkspaceHandler<NodeType> sax(*alloc_);
+    internal::SAXWorkspaceLease<NodeType> lease(sax, workspace);
+    if (!lease.SetUp(StringView(json, len))) {
       parse_result_ = kErrorNoMem;
       return *this;
     }

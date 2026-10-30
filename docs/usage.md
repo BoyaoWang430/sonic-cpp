@@ -49,6 +49,36 @@ which you should use to allocate memory for Node and Document.
 > pointers, iterators, or `DNode*` obtained from an earlier `Parse()` become
 > invalid and must be re-acquired after each parse.
 
+#### Reuse temporary parse storage
+
+Keep a `ParseWorkspace` across full parses to reuse temporary SAX storage.
+Each Document still owns its DOM and input strings independently.
+
+```c++
+sonic_json::ParseWorkspace workspace;
+for (const auto& json : inputs) {
+  sonic_json::Document doc;
+  doc.Parse(json, workspace);
+  if (doc.HasParseError()) {
+    // Handle doc.GetParseError().
+    continue;
+  }
+  // Read fields from doc.
+}
+```
+
+`Parse(StringView, workspace)` and `Parse(data, size, workspace)` accept the
+usual template parse flags. Ordinary `Parse` calls do not use a workspace.
+
+The constructor limits retained idle storage to 256 KiB by default; zero
+disables retention. Larger inputs still parse, but oversized buffers are freed.
+`Capacity()` and `MaxCapacity()` report retained bytes and the configured limit;
+this limit excludes DOM, input buffers, and storage borrowed by active parses.
+
+A workspace must outlive active Parse calls, but Documents can outlive it.
+Use a separate workspace per concurrent worker. Synchronous reentry is supported.
+`Release()` frees idle storage; an active parse may return storage afterward.
+
 ### Query in object
 There are two ways to find members: `operator[]` or `FindMember`. We recommend
 using `FindMember`.

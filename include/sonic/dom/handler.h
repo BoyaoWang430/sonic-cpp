@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdlib>
 #include <string>
 
 #include "sonic/dom/type.h"
@@ -24,6 +26,13 @@
 #include "sonic/writebuffer.h"
 
 namespace sonic_json {
+
+namespace internal {
+template <typename NodeType>
+class SAXWorkspaceLease;
+template <typename NodeType>
+class SAXWorkspaceHandler;
+}  // namespace internal
 
 template <typename NodeType>
 class GenericDocument;
@@ -223,6 +232,8 @@ class SAXHandler {
 
  private:
   friend class GenericDocument<NodeType>;
+  friend class internal::SAXWorkspaceLease<NodeType>;
+  friend class internal::SAXWorkspaceHandler<NodeType>;
 
   sonic_force_inline bool stringImpl(StringView s) {
     SONIC_ADD_NODE();
