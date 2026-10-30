@@ -22,7 +22,6 @@
 #include <sonic/macro.h>
 
 #include <cstring>
-#include <vector>
 
 #include "../common/quote_common.h"
 #include "../common/quote_tables.h"
@@ -30,121 +29,107 @@
 #include "simd.h"
 #include "unicode.h"
 
-#ifndef PAGE_SIZE
-#define PAGE_SIZE 4096
-#endif
-
-#ifdef __GNUC__
-#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__) || \
-    defined(__SANITIZE_LEAK__) || defined(__SANITIZE_UNDEFINED__)
-#ifndef SONIC_USE_SANITIZE
-#define SONIC_USE_SANITIZE
-#endif
-#endif
-#endif
-
-#if defined(__clang__)
-#if defined(__has_feature)
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || \
-    __has_feature(memory_sanitizer) ||                                     \
-    __has_feature(undefined_behavior_sanitizer) ||                         \
-    __has_feature(leak_sanitizer)
-#ifndef SONIC_USE_SANITIZE
-#define SONIC_USE_SANITIZE
-#endif
-#endif
-#endif
-#endif
-
-#define MOVE_N_CHARS(src, N) \
-  {                          \
-    (src) += (N);            \
-    nb -= (N);               \
-    dst += (N);              \
-  }
-
 namespace sonic_json {
 namespace internal {
 namespace riscv {
 
 using sonic_json::internal::common::handle_unicode_codepoint;
 
-template <bool EscapeEmoji>
-static sonic_force_inline uint64_t CopyAndGetEscapMask128(const char* src,
-                                                          char* dst) {
-  simd8<uint8_t> v =
-      simd8<uint8_t>::load(reinterpret_cast<const uint8_t*>(src));
-  v.store(reinterpret_cast<uint8_t*>(dst));
-
-  simd8<uint8_t> bs = simd8<uint8_t>::splat('\\');
-  simd8<uint8_t> quote = simd8<uint8_t>::splat('"');
-  simd8<uint8_t> ctrl = simd8<uint8_t>::splat('\x20');
-
-  simd8<bool> m1 = (v == bs);
-  simd8<bool> m2 = (v == quote);
-  simd8<bool> m3 = (v < ctrl);
-
-  simd8<bool> mask = m1 | m2;
-  mask = mask | m3;
-  if constexpr (EscapeEmoji) {
-    simd8<uint8_t> emoji = simd8<uint8_t>::splat(0xF0);
-    simd8<bool> m_emoji = (v >= emoji);
-    mask = mask | m_emoji;
+// Copy the zero-to-seven ordinary bytes preceding an escape.
+sonic_force_inline void CopyQuotePrefix(const uint8_t* src, uint8_t* dst,
+                                        size_t count) {
+  if (count & 4) {
+    std::memcpy(dst, src, 4);
+    src += 4;
+    dst += 4;
   }
-
-  return mask.to_bitmask();
+  if (count & 2) {
+    std::memcpy(dst, src, 2);
+    src += 2;
+    dst += 2;
+  }
+  if (count & 1) *dst = *src;
 }
 
+template <bool EscapeEmoji>
+sonic_force_inline uint64_t EscapeMask(uint64_t word) {
+  uint64_t mask = swar::eq_byte_msb(word, '\\') | swar::eq_byte_msb(word, '"') |
+                  swar::control_msb(word);
+  if constexpr (EscapeEmoji) {
+    mask |= swar::zero_byte_msb(~word & 0xF0F0F0F0F0F0F0F0ULL);
+  }
+  return mask;
+}
+
+// Quote views may end at the first inaccessible byte. Read only full tail
+// words, and discard classification bits outside each two/four-byte word.
+template <typename Word, SerializeFlags serializeFlags>
+sonic_force_inline void QuoteTailWords(const char*& src, size_t& nb,
+                                       char*& dst) {
+  constexpr bool EscapeEmoji =
+      serializeFlags & SerializeFlags::kSerializeEscapeEmoji;
+  constexpr uint64_t valid = sizeof(Word) == 4 ? 0x80808080ULL : 0x8080ULL;
+  while (nb >= sizeof(Word)) {
+    Word word;
+    std::memcpy(&word, src, sizeof(Word));
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    if constexpr (sizeof(Word) == 4)
+      word = __builtin_bswap32(word);
+    else
+      word = __builtin_bswap16(word);
+#endif
+    const uint64_t mask = EscapeMask<EscapeEmoji>(word) & valid;
+    if (mask == 0) {
+      std::memcpy(dst, src, sizeof(Word));
+      src += sizeof(Word);
+      dst += sizeof(Word);
+      nb -= sizeof(Word);
+    } else {
+      const size_t count = TrailingZeroes(mask) >> 3;
+      CopyQuotePrefix(reinterpret_cast<const uint8_t*>(src),
+                      reinterpret_cast<uint8_t*>(dst), count);
+      src += count;
+      dst += count;
+      nb -= count;
+      DoEscape<serializeFlags>(src, dst, nb);
+    }
+  }
+}
 template <SerializeFlags serializeFlags>
 sonic_static_inline char* Quote(const char* src, size_t nb, char* dst) {
   constexpr bool EscapeEmoji =
       serializeFlags & SerializeFlags::kSerializeEscapeEmoji;
   *dst++ = '"';
   sonic_assert(nb < (1ULL << 32));
-  uint64_t mm;
-  int cn;
-
-  /* VEC_LEN byte loop */
-  while (nb >= VEC_LEN) {
-    /* check for matches */
-    if ((mm = CopyAndGetEscapMask128<EscapeEmoji>(src, dst)) != 0) {
-      cn = TrailingZeroes(mm) >> 2;
-      MOVE_N_CHARS(src, cn);
+  while (nb >= 8) {
+    const uint64_t word = swar::load_u64(reinterpret_cast<const uint8_t*>(src));
+    const uint64_t mask = EscapeMask<EscapeEmoji>(word);
+    if (mask == 0) {
+      std::memcpy(dst, src, 8);
+      src += 8;
+      dst += 8;
+      nb -= 8;
+    } else {
+      const size_t count = TrailingZeroes(mask) >> 3;
+      CopyQuotePrefix(reinterpret_cast<const uint8_t*>(src),
+                      reinterpret_cast<uint8_t*>(dst), count);
+      src += count;
+      dst += count;
+      nb -= count;
+      DoEscape<serializeFlags>(src, dst, nb);
+    }
+  }
+  QuoteTailWords<uint32_t, serializeFlags>(src, nb, dst);
+  QuoteTailWords<uint16_t, serializeFlags>(src, nb, dst);
+  while (nb > 0) {
+    const uint8_t ch = static_cast<uint8_t>(*src);
+    if (kNeedEscaped[ch] || (EscapeEmoji && ch >= 0xF0)) {
       DoEscape<serializeFlags>(src, dst, nb);
     } else {
-      /* move to next block */
-      MOVE_N_CHARS(src, VEC_LEN);
+      *dst++ = *src++;
+      --nb;
     }
   }
-
-  if (nb > 0) {
-    char tmp_src[64];
-    const char* src_r;
-#ifdef SONIC_USE_SANITIZE
-    if (0) {
-#else
-    /* This code would cause address sanitizer report heap-buffer-overflow. */
-    if (((size_t)(src) & (PAGE_SIZE - 1)) <= (PAGE_SIZE - 64)) {
-      src_r = src;
-#endif
-    } else {
-      std::memcpy(tmp_src, src, nb);
-      src_r = tmp_src;
-    }
-    while (nb > 0) {
-      mm = CopyAndGetEscapMask128<EscapeEmoji>(src_r, dst) &
-           (0xFFFFFFFFFFFFFFFF >> ((VEC_LEN - nb) << 2));
-      if (mm) {
-        cn = TrailingZeroes(mm) >> 2;
-        MOVE_N_CHARS(src_r, cn);
-        DoEscape<serializeFlags>(src_r, dst, nb);
-      } else {
-        dst += nb;
-        nb = 0;
-      }
-    }
-  }
-
   *dst++ = '"';
   return dst;
 }
@@ -152,14 +137,17 @@ sonic_static_inline char* Quote(const char* src, size_t nb, char* dst) {
 template <ParseFlags parseFlags = ParseFlags::kParseDefault>
 sonic_force_inline size_t parseStringInplace(uint8_t*& src, SonicError& err) {
 #define SONIC_REPEAT8(v) \
-  { v v v v v v v v }
+  {                      \
+    v v v v v v v v      \
+  }
   constexpr bool kAllowUnescapedControlChars =
       (parseFlags & ParseFlags::kParseAllowUnescapedControlChars) != 0;
   uint8_t* dst = src;
   uint8_t* sdst = src;
+  // Short strings usually end in the first block; avoid an empty-block test.
+  auto block = StringBlock::Find<false>(src);
   while (1) {
   find:
-    auto block = StringBlock::Find(src);
     if (block.HasQuoteFirst<parseFlags>()) {
       int idx = block.QuoteIndex();
       src += idx;
@@ -174,10 +162,10 @@ sonic_force_inline size_t parseStringInplace(uint8_t*& src, SonicError& err) {
     }
     if (!block.HasBackslash()) {
       src += VEC_LEN;
+      block = StringBlock::Find(src);
       goto find;
     }
 
-    /* find out where the backspace is */
     auto bs_dist = block.BsIndex();
     src += bs_dist;
     dst = src;
@@ -197,7 +185,6 @@ sonic_force_inline size_t parseStringInplace(uint8_t*& src, SonicError& err) {
       src += 2;
       dst += 1;
     }
-    // fast path for continuous escaped chars
     if (*src == '\\') {
       bs_dist = 0;
       goto cont;
@@ -207,9 +194,7 @@ sonic_force_inline size_t parseStringInplace(uint8_t*& src, SonicError& err) {
     // Copy the next n bytes, and find the backslash and quote in them.
     simd8<uint8_t> v = simd8<uint8_t>::load(src);
     block = StringBlock::Find(v);
-    // If the next thing is the end quote, copy and return
     if (block.HasQuoteFirst<parseFlags>()) {
-      // we encountered quotes first. Move dst to point to quotes and exit
       while (1) {
         SONIC_REPEAT8(if (sonic_unlikely(*src == '"')) break;
                       else { *dst++ = *src++; });
@@ -225,8 +210,6 @@ sonic_force_inline size_t parseStringInplace(uint8_t*& src, SonicError& err) {
       }
     }
     if (!block.HasBackslash()) {
-      /* they are the same. Since they can't co-occur, it means we
-       * encountered neither. */
       v.store(dst);
       src += VEC_LEN;
       dst += VEC_LEN;
@@ -238,7 +221,6 @@ sonic_force_inline size_t parseStringInplace(uint8_t*& src, SonicError& err) {
     }
     goto cont;
   }
-  sonic_assert(false);
 #undef SONIC_REPEAT8
 }
 
@@ -247,4 +229,3 @@ sonic_force_inline size_t parseStringInplace(uint8_t*& src, SonicError& err) {
 }  // namespace sonic_json
 
 #undef VEC_LEN
-#undef MOVE_N_CHARS

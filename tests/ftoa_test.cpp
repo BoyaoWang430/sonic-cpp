@@ -23,7 +23,12 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <string>
+
+#include "sonic/sonic.h"
 
 // NOTE: the test case should as the ECMAScript Language Specification
 // reference: https://tc39.es/ecma262/#sec-numeric-types-number-tostring
@@ -222,6 +227,115 @@ TEST(F64toa, ConnerCase) {
   TestF64toa("0.000001", 1.0e-6);
   TestF64toa("0.000001000000000000001", 1.000000000000001e-6);
   TestF64toa("9.99999999999999e-7", 9.99999999999999e-7);
+}
+
+uint64_t DoubleBits(double value) {
+  uint64_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+template <SerializeFlags flags>
+void CheckPublicDoubleRoundTrip(double value, const char* expected = nullptr) {
+  SCOPED_TRACE(::testing::Message() << "bits=" << DoubleBits(value) << " flags="
+                                    << static_cast<unsigned>(flags));
+  Node node;
+  node.SetDouble(value);
+  WriteBuffer buffer;
+  ASSERT_EQ(node.Serialize<flags>(buffer), kErrorNone);
+  const std::string output(buffer.ToString(), buffer.Size());
+  SCOPED_TRACE(output);
+  if (expected) EXPECT_EQ(output, expected);
+  char* end = nullptr;
+  const double reference = std::strtod(output.c_str(), &end);
+  ASSERT_EQ(end, output.c_str() + output.size());
+  EXPECT_EQ(DoubleBits(reference), DoubleBits(value));
+  Document document;
+  document.Parse(output);
+  ASSERT_FALSE(document.HasParseError());
+  ASSERT_TRUE(document.IsDouble());
+  EXPECT_EQ(DoubleBits(document.GetDouble()), DoubleBits(value));
+}
+
+TEST(F64toa, PublicDecimalThresholdNeighborsRoundTrip) {
+  for (int exponent : {-308, -100, -22, -16, -7, -6, -4, -3, -1,  0,  1,  2,
+                       3,    4,    5,   6,   7,  8,  9,  10, 11,  12, 13, 14,
+                       15,   16,   17,  18,  19, 20, 21, 22, 100, 308}) {
+    const std::string decimal = "1e" + std::to_string(exponent);
+    const double value = std::strtod(decimal.c_str(), nullptr);
+    for (double neighbor :
+         {std::nextafter(value, 0.0), value,
+          std::nextafter(value, std::numeric_limits<double>::infinity())}) {
+      for (double signed_value : {neighbor, -neighbor}) {
+        CheckPublicDoubleRoundTrip<SerializeFlags::kSerializeDefault>(
+            signed_value);
+        CheckPublicDoubleRoundTrip<SerializeFlags::kSerializeFloatFormatJava>(
+            signed_value);
+      }
+    }
+  }
+  for (double value : {0.0, -0.0, std::numeric_limits<double>::min(),
+                       std::numeric_limits<double>::max(),
+                       std::numeric_limits<double>::denorm_min(),
+                       -std::numeric_limits<double>::denorm_min()}) {
+    CheckPublicDoubleRoundTrip<SerializeFlags::kSerializeDefault>(value);
+    CheckPublicDoubleRoundTrip<SerializeFlags::kSerializeFloatFormatJava>(
+        value);
+  }
+}
+
+TEST(F64toa, PublicDecimalInsertionWordWidths) {
+  struct Case {
+    double value;
+    const char* normal;
+    const char* java;
+  };
+  const Case cases[] = {
+      // Exact binary fractions 1 + 2^-n, n=1..16, produce exactly n digits
+      // after the decimal point. Avoid unrelated shortest-rounding ambiguity.
+      {1.0 + std::ldexp(1.0, -1), "1.5", "1.5"},
+      {1.0 + std::ldexp(1.0, -2), "1.25", "1.25"},
+      {1.0 + std::ldexp(1.0, -3), "1.125", "1.125"},
+      {1.0 + std::ldexp(1.0, -4), "1.0625", "1.0625"},
+      {1.0 + std::ldexp(1.0, -5), "1.03125", "1.03125"},
+      {1.0 + std::ldexp(1.0, -6), "1.015625", "1.015625"},
+      {1.0 + std::ldexp(1.0, -7), "1.0078125", "1.0078125"},
+      {1.0 + std::ldexp(1.0, -8), "1.00390625", "1.00390625"},
+      {1.0 + std::ldexp(1.0, -9), "1.001953125", "1.001953125"},
+      {1.0 + std::ldexp(1.0, -10), "1.0009765625", "1.0009765625"},
+      {1.0 + std::ldexp(1.0, -11), "1.00048828125", "1.00048828125"},
+      {1.0 + std::ldexp(1.0, -12), "1.000244140625", "1.000244140625"},
+      {1.0 + std::ldexp(1.0, -13), "1.0001220703125", "1.0001220703125"},
+      {1.0 + std::ldexp(1.0, -14), "1.00006103515625", "1.00006103515625"},
+      {1.0 + std::ldexp(1.0, -15), "1.000030517578125", "1.000030517578125"},
+      {1.0 + std::ldexp(1.0, -16), "1.0000152587890625", "1.0000152587890625"},
+      // Trim trailing zeros and retain the .0 convention for integral doubles.
+      {1.230000, "1.23", "1.23"},
+      {12.340000, "12.34", "12.34"},
+      {100.500000, "100.5", "100.5"},
+      {123.000000, "123.0", "123.0"},
+      // Default and Java notation thresholds, also checked with negative signs.
+      {1e-7, "1e-7", "1.0E-7"},
+      {1e-6, "0.000001", "1.0E-6"},
+      {1e-4, "0.0001", "1.0E-4"},
+      {1e-3, "0.001", "0.001"},
+      {1e6, "1000000.0", "1000000.0"},
+      {1e7, "10000000.0", "1.0E7"},
+      {1e20, "100000000000000000000.0", "1.0E20"},
+      {1e21, "1e+21", "1.0E21"},
+  };
+  for (const auto& value : cases) {
+    for (bool negative : {false, true}) {
+      const double signed_value = negative ? -value.value : value.value;
+      const std::string sign = negative ? "-" : "";
+      const std::string normal = sign + value.normal;
+      const std::string java = sign + value.java;
+      CheckPublicDoubleRoundTrip<SerializeFlags::kSerializeDefault>(
+          signed_value, normal.c_str());
+      CheckPublicDoubleRoundTrip<SerializeFlags::kSerializeFloatFormatJava>(
+          signed_value, java.c_str());
+    }
+  }
 }
 
 }  // namespace

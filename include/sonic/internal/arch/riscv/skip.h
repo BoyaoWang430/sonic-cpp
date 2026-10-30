@@ -23,6 +23,7 @@
 
 #include "base.h"
 #include "simd.h"
+#include "unicode.h"
 
 namespace sonic_json {
 namespace internal {
@@ -38,24 +39,21 @@ sonic_force_inline bool SkipContainer(const uint8_t *data, size_t &pos,
   return skip_container<simd8x64<uint8_t>>(data, pos, len, left, right);
 }
 
-// TODO: optimize by removing bound checking.
 sonic_force_inline uint8_t skip_space(const uint8_t *data, size_t &pos,
                                       size_t &, uint64_t &) {
   // fast path for single space
   if (!IsSpace(data[pos++])) return data[pos - 1];
   if (!IsSpace(data[pos++])) return data[pos - 1];
 
-  // current pos is out of block
   while (1) {
     uint64_t nonspace = GetNonSpaceBits(data + pos);
     if (nonspace) {
-      pos += TrailingZeroes(nonspace) >> 2;
+      pos += TrailingZeroes(nonspace);
       return data[pos++];
     } else {
       pos += 16;
     }
   }
-  sonic_assert(false && "!should not happen");
 }
 
 }  // namespace riscv

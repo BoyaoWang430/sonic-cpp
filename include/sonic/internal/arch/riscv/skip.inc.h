@@ -19,9 +19,9 @@
 #endif
 
 template <typename T>
-sonic_force_inline uint64_t GetStringBits(const uint8_t *data,
-                                          uint64_t &prev_instring,
-                                          uint64_t &prev_escaped) {
+sonic_force_inline uint64_t GetStringBits(const uint8_t* data,
+                                          uint64_t& prev_instring,
+                                          uint64_t& prev_escaped) {
   const T v(data);
   uint64_t escaped = 0;
   uint64_t bs_bits = v.eq('\\');
@@ -40,19 +40,19 @@ sonic_force_inline uint64_t GetStringBits(const uint8_t *data,
 // GetNextToken find the next characters in tokens and update the position to
 // it.
 template <size_t N>
-sonic_force_inline uint8_t GetNextToken(const uint8_t *data, size_t &pos,
+sonic_force_inline uint8_t GetNextToken(const uint8_t* data, size_t& pos,
                                         size_t len, const char (&tokens)[N]) {
-  while (pos + VEC_LEN <= len) {
-    simd8<uint8_t> v = simd8<uint8_t>::load(data + pos);
-    simd8<bool> vor = simd8<bool>::splat(false);
+  while (pos <= len && len - pos >= VEC_LEN) {
+    const uint64_t lo = swar::load_u64(data + pos);
+    const uint64_t hi = swar::load_u64(data + pos + 8);
+    uint64_t lo_bits = 0, hi_bits = 0;
     for (size_t i = 0; i < N - 1; i++) {
-      simd8<bool> vtmp = (v == simd8<uint8_t>::splat((uint8_t)(tokens[i])));
-      vor = vor | vtmp;
+      lo_bits |= swar::eq_byte_msb(lo, static_cast<uint8_t>(tokens[i]));
+      hi_bits |= swar::eq_byte_msb(hi, static_cast<uint8_t>(tokens[i]));
     }
-
-    uint64_t next = vor.to_bitmask();
-    if (next) {
-      pos += (TrailingZeroes(next) >> 2);
+    if (lo_bits | hi_bits) {
+      pos += lo_bits ? (TrailingZeroes(lo_bits) >> 3)
+                     : 8 + (TrailingZeroes(hi_bits) >> 3);
       return data[pos];
     }
     pos += VEC_LEN;
@@ -69,37 +69,32 @@ sonic_force_inline uint8_t GetNextToken(const uint8_t *data, size_t &pos,
 }
 
 // pos is the after the ending quote
-sonic_force_inline int SkipString(const uint8_t *data, size_t &pos,
+sonic_force_inline int SkipString(const uint8_t* data, size_t& pos,
                                   size_t len) {
   const static int kEscaped = 2;
   const static int kNormal = 1;
   const static int kUnclosed = 0;
-  uint64_t quote_bits = 0;
-  uint64_t bs_bits = 0;
   int ret = kNormal;
-  while (pos + VEC_LEN <= len) {
-    simd8<uint8_t> v = simd8<uint8_t>::load(data + pos);
-    simd8<bool> bs_cmp = (v == simd8<uint8_t>::splat('\\'));
-    simd8<bool> quote_cmp = (v == simd8<uint8_t>::splat('"'));
-    bs_bits = bs_cmp.to_bitmask();
-    quote_bits = quote_cmp.to_bitmask();
-    if (((bs_bits - 1) & quote_bits) != 0) {
-      pos += (TrailingZeroes(quote_bits) >> 2) + 1;
+  while (pos <= len && len - pos >= VEC_LEN) {
+    const uint64_t lo = swar::load_u64(data + pos);
+    const uint64_t hi = swar::load_u64(data + pos + 8);
+    const uint64_t lo_events =
+        swar::eq_byte_msb(lo, '\\') | swar::eq_byte_msb(lo, '"');
+    const uint64_t hi_events =
+        swar::eq_byte_msb(hi, '\\') | swar::eq_byte_msb(hi, '"');
+    if ((lo_events | hi_events) == 0) {
+      pos += VEC_LEN;
+      continue;
+    }
+    pos += lo_events ? (TrailingZeroes(lo_events) >> 3)
+                     : 8 + (TrailingZeroes(hi_events) >> 3);
+    if (data[pos] == '"') {
+      ++pos;
       return ret;
     }
-    if (bs_bits) {
-      ret = kEscaped;
-      pos += ((TrailingZeroes(bs_bits) >> 2) + 2);
-      while (pos < len) {
-        if (data[pos] == '\\') {
-          pos += 2;
-        } else {
-          break;
-        }
-      }
-    } else {
-      pos += VEC_LEN;
-    }
+    ret = kEscaped;
+    pos += 2;
+    while (pos < len && data[pos] == '\\') pos += 2;
   }
   while (pos < len) {
     if (data[pos] == '\\') {
@@ -119,12 +114,12 @@ sonic_force_inline int SkipString(const uint8_t *data, size_t &pos,
 
 // return true if container is closed.
 template <typename T>
-sonic_force_inline bool skip_container(const uint8_t *data, size_t &pos,
+sonic_force_inline bool skip_container(const uint8_t* data, size_t& pos,
                                        size_t len, uint8_t left,
                                        uint8_t right) {
   uint64_t prev_instring = 0, prev_escaped = 0, instring;
   int rbrace_num = 0, lbrace_num = 0, last_lbrace_num;
-  const uint8_t *p;
+  const uint8_t* p;
   while (pos + 64 <= len) {
     p = data + pos;
 #define SKIP_LOOP()                                                    \
@@ -159,10 +154,19 @@ sonic_force_inline bool skip_container(const uint8_t *data, size_t &pos,
   return false;
 }
 
-sonic_force_inline uint8_t skip_space_safe(const uint8_t *data, size_t &pos,
-                                           size_t len, size_t &, uint64_t &) {
-  while (pos < len && IsSpace(data[pos++]))
-    ;
-  // if not found, still return the space chars
+sonic_force_inline uint8_t skip_space_safe(const uint8_t* data, size_t& pos,
+                                           size_t len, size_t&, uint64_t&) {
+  if (pos >= len) return len == 0 ? 0 : data[len - 1];
+  if (!IsSpace(data[pos++])) return data[pos - 1];
+  while (len - pos >= 16) {
+    uint64_t nonspace = GetNonSpaceBits(data + pos);
+    if (nonspace) {
+      pos += TrailingZeroes(nonspace);
+      return data[pos++];
+    }
+    pos += 16;
+  }
+  while (pos < len && IsSpace(data[pos++]));
+  // If not found, still return the last space character.
   return data[pos - 1];
 }

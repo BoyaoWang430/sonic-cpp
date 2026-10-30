@@ -17,10 +17,10 @@
 
 #pragma once
 
+#include <sonic/dom/flags.h>
 #include <sonic/macro.h>
 
 #include <cstdint>
-#include <cstring>
 
 #include "../common/unicode_common.h"
 #include "base.h"
@@ -34,8 +34,9 @@ using sonic_json::internal::common::handle_unicode_codepoint;
 
 struct StringBlock {
  public:
-  sonic_force_inline static StringBlock Find(const uint8_t *src);
-  sonic_force_inline static StringBlock Find(simd8<uint8_t> &v);
+  template <bool CheckEmpty = true>
+  sonic_force_inline static StringBlock Find(const uint8_t* src);
+  sonic_force_inline static StringBlock Find(simd8<uint8_t>& v);
   template <ParseFlags parseFlags>
   sonic_force_inline bool HasQuoteFirst() const {
     constexpr bool kAllowUnescapedControlChars =
@@ -53,59 +54,53 @@ struct StringBlock {
     return ((quote_bits - 1) & unescaped_bits) != 0;
   }
   sonic_force_inline int QuoteIndex() const {
-    return TrailingZeroes(quote_bits) >> 2;
+    return TrailingZeroes(quote_bits);
   }
-  sonic_force_inline int BsIndex() const {
-    return TrailingZeroes(bs_bits) >> 2;
-  }
+  sonic_force_inline int BsIndex() const { return TrailingZeroes(bs_bits); }
 
   uint64_t bs_bits;
   uint64_t quote_bits;
   uint64_t unescaped_bits;
 };
 
-sonic_force_inline StringBlock StringBlock::Find(const uint8_t *src) {
-  simd8<uint8_t> v = simd8<uint8_t>::load(src);
-  return StringBlock::Find(v);
-}
-
-sonic_force_inline StringBlock StringBlock::Find(simd8<uint8_t> &v) {
-  simd8<uint8_t> bs = simd8<uint8_t>::splat('\\');
-  simd8<uint8_t> quote = simd8<uint8_t>::splat('"');
-  simd8<uint8_t> ctrl = simd8<uint8_t>::splat('\x1f');
-
-  simd8<bool> bs_cmp = (v == bs);
-  simd8<bool> quote_cmp = (v == quote);
-  simd8<bool> ctrl_cmp = (v <= ctrl);
-
+// Scanner masks use one bit per byte; the SIMD facade uses four.
+template <bool CheckEmpty>
+sonic_force_inline StringBlock StringBlock::Find(const uint8_t* src) {
+  const uint64_t lo = swar::load_u64(src);
+  const uint64_t hi = swar::load_u64(src + 8);
+  const uint64_t bs_lo = swar::eq_byte_msb(lo, '\\');
+  const uint64_t bs_hi = swar::eq_byte_msb(hi, '\\');
+  const uint64_t quote_lo = swar::eq_byte_msb(lo, '"');
+  const uint64_t quote_hi = swar::eq_byte_msb(hi, '"');
+  const uint64_t control_lo = swar::control_msb(lo);
+  const uint64_t control_hi = swar::control_msb(hi);
+  if constexpr (CheckEmpty) {
+    if ((bs_lo | bs_hi | quote_lo | quote_hi | control_lo | control_hi) == 0) {
+      return {0, 0, 0};
+    }
+  }
   return {
-      bs_cmp.to_bitmask(),
-      quote_cmp.to_bitmask(),
-      ctrl_cmp.to_bitmask(),
+      swar::byte_msb_to_mask(bs_lo) |
+          (uint64_t(swar::byte_msb_to_mask(bs_hi)) << 8),
+      swar::byte_msb_to_mask(quote_lo) |
+          (uint64_t(swar::byte_msb_to_mask(quote_hi)) << 8),
+      swar::byte_msb_to_mask(control_lo) |
+          (uint64_t(swar::byte_msb_to_mask(control_hi)) << 8),
   };
 }
 
-sonic_force_inline uint64_t GetNonSpaceBits(const uint8_t *data) {
-  simd8<uint8_t> v = simd8<uint8_t>::load(data);
-  simd8<uint8_t> space = simd8<uint8_t>::splat(' ');
-  simd8<uint8_t> tab = simd8<uint8_t>::splat('\t');
-  simd8<uint8_t> nl = simd8<uint8_t>::splat('\n');
-  simd8<uint8_t> cr = simd8<uint8_t>::splat('\r');
-
-  simd8<bool> m1 = (v == space);
-  simd8<bool> m2 = (v == tab);
-  simd8<bool> m3 = (v == nl);
-  simd8<bool> m4 = (v == cr);
-
-  simd8<bool> m5 = m1 | m2;
-  simd8<bool> m6 = m3 | m4;
-  simd8<bool> m7 = m5 | m6;
-  simd8<bool> m8 = ~m7;
-
-  return m8.to_bitmask();
+sonic_force_inline StringBlock StringBlock::Find(simd8<uint8_t>& v) {
+  return Find(v.data);
 }
 
-sonic_force_inline bool IsAscii(const simd8x64<uint8_t> &input) {
+sonic_force_inline uint64_t GetNonSpaceBits(const uint8_t* data) {
+  return swar::byte_msb_to_mask(swar::nonspace_msb(swar::load_u64(data))) |
+         (uint64_t(swar::byte_msb_to_mask(
+              swar::nonspace_msb(swar::load_u64(data + 8))))
+          << 8);
+}
+
+sonic_force_inline bool IsAscii(const simd8x64<uint8_t>& input) {
   simd8<uint8_t> bits = input.reduce_or();
   return bits.max_val() < 0x80u;
 }

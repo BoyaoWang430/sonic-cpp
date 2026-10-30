@@ -335,7 +335,6 @@ class Parser {
       SET_UINT_AND_RETURN(0);
     }
 
-    // CHECK_DIGIT();
     {
       size_t digit_start = i;
       man = str2int(s, i);
@@ -344,6 +343,17 @@ class Parser {
         RETURN_SET_ERROR_CODE(kParseErrorInvalidChar);
       }
       if (man_nd > 19) {  // slow path
+#if defined(SONIC_HAVE_RISCV)
+        // The first scan already found the end; reconstruct only the prefix.
+        exp10 = man_nd - 19;
+        man_nd = 19;
+        man = uint64_t(internal::riscv::Parse8DigitsUnchecked(s + digit_start)) *
+                  100000000 +
+              internal::riscv::Parse8DigitsUnchecked(s + digit_start + 8);
+        for (size_t digit = 16; digit < 19; ++digit) {
+          man = man * 10 + s[digit_start + digit] - '0';
+        }
+#else
         i = digit_start;
         man = 0;
         man_nd = 0;
@@ -356,6 +366,7 @@ class Parser {
           }
           i++;
         }
+#endif
       }
     }
 
@@ -423,13 +434,15 @@ class Parser {
       goto double_fast;
     }
 
-    // Should be unreachable.
-    // TODO: add assertion.
-
   double_fract : {
     int fract_len = FLOATING_LONGEST_DIGITS - man_nd;
     if (fract_len > 0) {
+#if defined(SONIC_HAVE_RISCV)
+      uint64_t sum =
+          internal::riscv::ParseFractionDigits(s + i, fract_len, len_ - i);
+#else
       uint64_t sum = internal::simd_str2int(s + i, fract_len);
+#endif
       const uint64_t pow10[18] = {
           1,
           10,
@@ -453,11 +466,13 @@ class Parser {
       man = man * pow10[fract_len] + sum;
       man_nd += fract_len;
       i += fract_len;
+#if !defined(SONIC_HAVE_RISCV)
       while (man_nd < FLOATING_LONGEST_DIGITS && is_digit(s[i])) {
         man = man * 10 + s[i] - '0';
         man_nd++;
         i++;
       }
+#endif
     }
   }
 

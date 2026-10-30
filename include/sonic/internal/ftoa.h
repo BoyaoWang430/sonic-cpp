@@ -743,6 +743,15 @@ static sonic_force_inline uint64_t RoundToOdd(uint64x2 g, uint64_t cp) {
 
 static sonic_force_inline unsigned Ctz10(const uint64_t v) {
   if (v >= 10000000000ull) {
+#if defined(__riscv) && (__riscv_xlen == 64)
+    if (v >= 10000000000000000ull) return 17;
+    if (v >= 1000000000000000ull) return 16;
+    if (v >= 100000000000000ull) return 15;
+    if (v >= 10000000000000ull) return 14;
+    if (v >= 1000000000000ull) return 13;
+    if (v >= 100000000000ull) return 12;
+    return 11;
+#else
     if (v < 100000000000ull) return 11;
     if (v < 1000000000000ull) return 12;
     if (v < 10000000000000ull) return 13;
@@ -752,6 +761,7 @@ static sonic_force_inline unsigned Ctz10(const uint64_t v) {
       return 16;
     else
       return 17;
+#endif
   }
   if (v < 10ull) return 1;
   if (v < 100ull) return 2;
@@ -875,6 +885,18 @@ static sonic_force_inline char* FormatExponent(F64Decimal v, char* out,
   return end;
 }
 
+#if defined(SONIC_HAVE_RISCV) && defined(__riscv_misaligned_fast)
+template <typename Word>
+static sonic_force_inline void MoveSignificandRight(char* p, size_t count) {
+  Word first, last;
+  std::memcpy(&first, p, sizeof(Word));
+  std::memcpy(&last, p + count - sizeof(Word), sizeof(Word));
+  // Load both pieces before writing: the destination overlaps the source.
+  std::memcpy(p + 1, &first, sizeof(Word));
+  std::memcpy(p + count - sizeof(Word) + 1, &last, sizeof(Word));
+}
+#endif
+
 static sonic_force_inline char* FormatDecimal(F64Decimal v, char* out,
                                               unsigned cnt) {
   char* p = out;
@@ -900,7 +922,22 @@ static sonic_force_inline char* FormatDecimal(F64Decimal v, char* out,
   /* insert point or add trailing zeros */
   int digs = end - p;
   if (digs > point) {
+#if defined(SONIC_HAVE_RISCV) && defined(__riscv_misaligned_fast)
+    // At most sixteen significand digits move right by one byte.
+    const size_t count = digs - point;
+    char* suffix = p + point;
+    if (count >= 8) {
+      MoveSignificandRight<uint64_t>(suffix, count);
+    } else if (count >= 4) {
+      MoveSignificandRight<uint32_t>(suffix, count);
+    } else if (count >= 2) {
+      MoveSignificandRight<uint16_t>(suffix, count);
+    } else {
+      suffix[1] = suffix[0];
+    }
+#else
     std::memmove(p + point + 1, p + point, digs - point);
+#endif
     p[point] = '.';
     end++;
   } else {

@@ -24,86 +24,11 @@
 #include <cstdint>
 #include <cstring>
 
+#include "swar.h"
+
 namespace sonic_json {
 namespace internal {
 namespace riscv {
-
-#if defined(__riscv) && defined(__riscv_xlen) && (__riscv_xlen == 64) && \
-    defined(__riscv_zbb)
-#define SONIC_RISCV_SIMD_HAS_ZBB 1
-
-namespace riscv_zbb_detail {
-
-static constexpr uint64_t kByteMsb = 0x8080808080808080ULL;
-static constexpr uint64_t kByteLsb = 0x0101010101010101ULL;
-static constexpr uint64_t kMovemaskMultiplier = 0x0002040810204081ULL;
-
-sonic_force_inline uint64_t load_u64(const uint8_t* ptr) {
-  uint64_t value;
-  std::memcpy(&value, ptr, sizeof(value));
-  return value;
-}
-
-sonic_force_inline uint64_t orc_b(uint64_t value) {
-  uint64_t result;
-  __asm__ volatile("orc.b %0, %1" : "=r"(result) : "r"(value));
-  return result;
-}
-
-sonic_force_inline uint32_t byte_msb_to_mask(uint64_t value) {
-  return static_cast<uint32_t>(((value & kByteMsb) * kMovemaskMultiplier) >>
-                               56);
-}
-
-sonic_force_inline uint32_t nonzero_byte_mask(uint64_t value) {
-  return byte_msb_to_mask(orc_b(value));
-}
-
-sonic_force_inline uint32_t zero_byte_mask(uint64_t value) {
-  return byte_msb_to_mask(~orc_b(value));
-}
-
-sonic_force_inline uint32_t bool_mask16(const uint8_t* ptr) {
-  uint32_t low = nonzero_byte_mask(load_u64(ptr));
-  uint32_t high = nonzero_byte_mask(load_u64(ptr + 8));
-  return low | (high << 8);
-}
-
-sonic_force_inline uint32_t eq_mask16(const uint8_t* ptr, uint8_t value) {
-  uint64_t repeated = kByteLsb * value;
-  uint32_t low = zero_byte_mask(load_u64(ptr) ^ repeated);
-  uint32_t high = zero_byte_mask(load_u64(ptr + 8) ^ repeated);
-  return low | (high << 8);
-}
-
-sonic_force_inline uint32_t lteq_mask16(const uint8_t* ptr, uint8_t value) {
-  if (value == 0xFFu) {
-    return 0xFFFFu;
-  }
-  if (value == 0x1Fu) {
-    constexpr uint64_t high_three_bits = 0xE0E0E0E0E0E0E0E0ULL;
-    uint32_t low = zero_byte_mask(load_u64(ptr) & high_three_bits);
-    uint32_t high = zero_byte_mask(load_u64(ptr + 8) & high_three_bits);
-    return low | (high << 8);
-  }
-  if (value == 0x7Fu) {
-    uint32_t low = byte_msb_to_mask(~load_u64(ptr));
-    uint32_t high = byte_msb_to_mask(~load_u64(ptr + 8));
-    return low | (high << 8);
-  }
-
-  uint32_t mask = 0;
-  for (int i = 0; i < 16; i++) {
-    if (ptr[i] <= value) mask |= (1u << i);
-  }
-  return mask;
-}
-
-}  // namespace riscv_zbb_detail
-
-#else
-#define SONIC_RISCV_SIMD_HAS_ZBB 0
-#endif
 
 template <typename T>
 struct simd8;
@@ -135,36 +60,16 @@ struct simd8<bool> {
   // We return uint64_t with 4 bits per byte (same as NEON movemask format)
   // so that TrailingZeroes(x) >> 2 gives the correct byte index.
   sonic_force_inline uint64_t to_bitmask() const {
-#if SONIC_RISCV_SIMD_HAS_ZBB
-    uint32_t bits = riscv_zbb_detail::bool_mask16(data);
-    uint64_t mask = 0;
-    for (int i = 0; i < 16; i++) {
-      if (bits & (1u << i)) {
-        mask |= (0xFULL << (i * 4));
-      }
-    }
-    return mask;
-#else
-    uint64_t mask = 0;
-    for (int i = 0; i < 16; i++) {
-      if (data[i]) {
-        mask |= (0xFULL << (i * 4));
-      }
-    }
-    return mask;
-#endif
+    uint64_t bits = swar::bool_mask16(data);
+    bits = (bits | (bits << 24)) & 0x000000FF000000FFULL;
+    bits = (bits | (bits << 12)) & 0x000F000F000F000FULL;
+    bits = (bits | (bits << 6)) & 0x0303030303030303ULL;
+    bits = (bits | (bits << 3)) & 0x1111111111111111ULL;
+    return bits * 15;
   }
 
   sonic_force_inline bool any() const {
-#if SONIC_RISCV_SIMD_HAS_ZBB
-    return (riscv_zbb_detail::load_u64(data) |
-            riscv_zbb_detail::load_u64(data + 8)) != 0;
-#else
-    for (int i = 0; i < 16; i++) {
-      if (data[i]) return true;
-    }
-    return false;
-#endif
+    return (swar::load_u64(data) | swar::load_u64(data + 8)) != 0;
   }
 
   sonic_force_inline simd8<bool> operator~() const {
@@ -713,35 +618,28 @@ struct simd8x64 {
   }
 
   sonic_force_inline uint64_t eq(const T m) const {
-#if SONIC_RISCV_SIMD_HAS_ZBB
     const uint8_t byte = static_cast<uint8_t>(m);
-    uint64_t r0 = riscv_zbb_detail::eq_mask16(
+    uint64_t r0 = swar::eq_mask16(
         reinterpret_cast<const uint8_t*>(this->chunks[0].data), byte);
-    uint64_t r1 = riscv_zbb_detail::eq_mask16(
+    uint64_t r1 = swar::eq_mask16(
         reinterpret_cast<const uint8_t*>(this->chunks[1].data), byte);
-    uint64_t r2 = riscv_zbb_detail::eq_mask16(
+    uint64_t r2 = swar::eq_mask16(
         reinterpret_cast<const uint8_t*>(this->chunks[2].data), byte);
-    uint64_t r3 = riscv_zbb_detail::eq_mask16(
+    uint64_t r3 = swar::eq_mask16(
         reinterpret_cast<const uint8_t*>(this->chunks[3].data), byte);
     return r0 | (r1 << 16) | (r2 << 32) | (r3 << 48);
-#else
-    const simd8<T> mask = simd8<T>::splat(m);
-    return simd8x64<bool>(this->chunks[0] == mask, this->chunks[1] == mask,
-                          this->chunks[2] == mask, this->chunks[3] == mask)
-        .to_bitmask();
-#endif
   }
 
   sonic_force_inline uint64_t lteq(const T m) const {
-#if SONIC_RISCV_SIMD_HAS_ZBB
+#if defined(__riscv) && defined(__riscv_zbb)
     const uint8_t byte = static_cast<uint8_t>(m);
-    uint64_t r0 = riscv_zbb_detail::lteq_mask16(
+    uint64_t r0 = swar::lteq_mask16(
         reinterpret_cast<const uint8_t*>(this->chunks[0].data), byte);
-    uint64_t r1 = riscv_zbb_detail::lteq_mask16(
+    uint64_t r1 = swar::lteq_mask16(
         reinterpret_cast<const uint8_t*>(this->chunks[1].data), byte);
-    uint64_t r2 = riscv_zbb_detail::lteq_mask16(
+    uint64_t r2 = swar::lteq_mask16(
         reinterpret_cast<const uint8_t*>(this->chunks[2].data), byte);
-    uint64_t r3 = riscv_zbb_detail::lteq_mask16(
+    uint64_t r3 = swar::lteq_mask16(
         reinterpret_cast<const uint8_t*>(this->chunks[3].data), byte);
     return r0 | (r1 << 16) | (r2 << 32) | (r3 << 48);
 #else
@@ -756,5 +654,3 @@ struct simd8x64 {
 }  // namespace riscv
 }  // namespace internal
 }  // namespace sonic_json
-
-#undef SONIC_RISCV_SIMD_HAS_ZBB

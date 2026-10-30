@@ -772,6 +772,10 @@ class DNode : public GenericNode<DNode<Allocator>> {
   }
 
   sonic_force_inline MemberIterator findMemberImpl(StringView key) const {
+#if defined(SONIC_HAVE_RISCV) && defined(SONIC_STATIC_DISPATCH) && \
+    defined(__riscv_misaligned_fast)
+    return findMemberImpl(key.data(), key.size());
+#else
     if (nullptr != getMap()) {
       return findFromMap(key);
     }
@@ -782,6 +786,7 @@ class DNode : public GenericNode<DNode<Allocator>> {
       }
     }
     return const_cast<MemberIterator>(it);
+#endif
   }
 
   sonic_force_inline MemberIterator findMemberImpl(const char* key,
