@@ -26,5 +26,9 @@ namespace internal {
 SONIC_USING_ARCH_FUNC(parseStringInplace);
 SONIC_USING_ARCH_FUNC(Quote);
 
+#if defined(SONIC_HAVE_RVV)
+SONIC_USING_ARCH_FUNC(parseStringInplacePadded);
+#endif
+
 }  // namespace internal
 }  // namespace sonic_json

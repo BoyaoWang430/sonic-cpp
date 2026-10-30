@@ -82,6 +82,7 @@ class Parser {
   template <typename LazySAX>
   sonic_force_inline ParseResult ParseLazy(const uint8_t *data, size_t len,
                                            LazySAX &sax) {
+    scan = internal::SkipScanner{};
     return parseLazyImpl(data, len, sax);
   }
 
@@ -133,7 +134,12 @@ class Parser {
   sonic_force_inline StringView parseStringHelper() {
     uint8_t *src = json_buf_ + pos_;
     uint8_t *sdst = src;
+#if defined(SONIC_HAVE_RVV)
+    size_t n = internal::parseStringInplacePadded<parseFlags>(
+        src, pos_ <= len_ ? len_ - pos_ : 0, err_);
+#else
     size_t n = internal::parseStringInplace<parseFlags>(src, err_);
+#endif
     pos_ = src - json_buf_;
     return StringView(reinterpret_cast<char *>(sdst), n);
   }
@@ -1177,6 +1183,7 @@ class Parser {
     pos_ = 0;
     err_ = kErrorNone;
     len_ = 0;
+    scan = internal::SkipScanner{};
   }
   constexpr static size_t kJsonPaddingSize = SONICJSON_PADDING;
 

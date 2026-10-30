@@ -8,9 +8,55 @@ A fast JSON serializing & deserializing library, accelerated by SIMD.
 
 ## Requirement
 - c++11 or above
-- x86 platform with AVX2 instruction
+- x86 with SSE4.2/AVX2, Arm with NEON/SVE2, or 64-bit RISC-V
 - GCC or LLVM compiler (not support MSVC compiler now)
 - Linux OS
+
+### RISC-V builds
+
+RISC-V supports the scalar `rv64gc` baseline, optional Zbb bit manipulation,
+and RVV 1.0 through `<riscv_vector.h>` intrinsics. GCC 15.2 provides the required
+intrinsics. The RVV backend uses the actual vector length without a fixed VLEN
+build setting.
+
+Architecture selection is compile-time; an RVV binary requires a processor and
+operating system that support RVV 1.0. `SONIC_DYNAMIC_DISPATCH` does not detect
+RVV at runtime.
+
+CMake defaults to scalar RISC-V. Enable RVV with `ENABLE_RVV`, and optionally
+combine it with `ENABLE_RISCV_ZBB`:
+
+```shell
+cmake -S . -B build-rvv -DENABLE_RVV=ON -DENABLE_RISCV_ZBB=ON
+cmake --build build-rvv --target unittest -j
+./build-rvv/tests/unittest
+```
+
+These options select `-march=rv64gcv_zbb`; omitting Zbb selects `rv64gcv`.
+For a cross-build, also provide the appropriate CMake toolchain file. A manual
+header-only build can pass the same `-march` option to the compiler.
+
+Bazel exposes `riscv64`, `riscv64_zbb`, `riscv64_rvv`, and `riscv64_rvv_zbb`:
+
+```shell
+bazel run :unittest --//:sonic_arch=riscv64_rvv_zbb --//:sonic_dispatch=static
+bash scripts/unittest.sh -g --arch=riscv64_rvv_zbb --dispatch=static
+```
+
+Run the RVV regression tests on hardware, then reuse the same non-sanitized
+binary under QEMU at VLEN 128, 256, 512, and 1024:
+
+```shell
+./build-rvv/tests/unittest --gtest_filter='Rvv*.*'
+QEMU_RISCV64=/path/to/qemu-riscv64 \
+  bash scripts/rvv_vlen_test.sh ./build-rvv/tests/unittest
+```
+
+Configure the QEMU test build with `-DENABLE_ASAN=OFF`. The matrix script rejects
+binaries without RVV tests and propagates failures. It uses QEMU's `max` CPU
+model to accommodate linked dependencies, so this checks vector-length
+portability rather than minimum ISA requirements or native performance.
+Run the full unit-test suite as well when changing the RVV backend.
 
 ## Features
 - Complete APIs for JSON value manipulation

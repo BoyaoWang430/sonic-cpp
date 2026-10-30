@@ -10,7 +10,8 @@ Usage:
     -g, --gcc       compiler is gcc
     -c, --clang     compiler is clang
     -h, --help      display this message
-    --arch={aarch64|haswell|westmere} target architecture, default is haswell
+    --arch={arm|aarch64|arm64|haswell|westmere|sve2|riscv64|riscv64_zbb|riscv64_rvv|riscv64_rvv_zbb}
+                   target architecture, default is haswell
     --dispatch={dynamic|static} sonic dispatch mode, default is static
 
     example: bash unittest.sh -g --arch=westmere --dispatch=static
@@ -45,7 +46,11 @@ while true; do
     --arch)
       case "$2" in
         "") shift 2 ;;
-        aarch64 | haswell | westmere)
+        aarch64 | arm64)
+          UNIT_TEST_ARCH=arm
+          shift 2
+          ;;
+        arm | haswell | westmere | sve2 | riscv64 | riscv64_zbb | riscv64_rvv | riscv64_rvv_zbb)
           UNIT_TEST_ARCH="$2"
           shift 2
           ;;
@@ -95,9 +100,13 @@ ${BAZEL} run //:unittest --//:sonic_arch=$UNIT_TEST_ARCH \
   --//:sonic_dispatch=${UNIT_TEST_DISPATCH} \
   --copt="-DSONIC_LOCKED_ALLOCATOR" -s
 
-${BAZEL} build //:unittest --//:sonic_sanitizer=${UNIT_TEST_SANITIZER} --copt="-DSONIC_DEBUG"
+${BAZEL} build //:unittest --//:sonic_arch=${UNIT_TEST_ARCH} \
+  --//:sonic_dispatch=${UNIT_TEST_DISPATCH} \
+  --//:sonic_sanitizer=${UNIT_TEST_SANITIZER} --copt="-DSONIC_DEBUG"
 
-${BAZEL} build //:benchmark
-${BAZEL} build //:benchmark --copt="-DSONIC_DEBUG"
+${BAZEL} build //:benchmark --//:sonic_arch=${UNIT_TEST_ARCH} \
+  --//:sonic_dispatch=${UNIT_TEST_DISPATCH}
+${BAZEL} build //:benchmark --//:sonic_arch=${UNIT_TEST_ARCH} \
+  --//:sonic_dispatch=${UNIT_TEST_DISPATCH} --copt="-DSONIC_DEBUG"
 
 set +x

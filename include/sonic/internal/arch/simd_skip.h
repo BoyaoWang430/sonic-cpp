@@ -232,6 +232,8 @@ class SkipScanner {
   template <typename JPStringType>
   long GetOnDemand(StringView json, size_t &pos,
                    const GenericJsonPointer<JPStringType> &path) {
+    nonspace_bits_end_ = 0;
+    nonspace_bits_ = 0;
     using namespace sonic_json::internal;
     size_t i = 0;
     uint8_t c;

@@ -51,4 +51,7 @@
 #define SONIC_HAVE_RISCV_ZBB 1
 #endif
 #define SONIC_HAVE_RISCV 1
+#if defined(__riscv_v) && (__riscv_v >= 1000000)
+#define SONIC_HAVE_RVV 1
+#endif
 #endif

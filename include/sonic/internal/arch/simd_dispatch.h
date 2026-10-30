@@ -39,6 +39,9 @@
 #elif defined(SONIC_HAVE_NEON)
 #define SONIC_USING_ARCH_FUNC(func) using neon::func
 #define INCLUDE_ARCH_FILE(file) SONIC_STRINGIFY(neon/file)
+#elif defined(SONIC_HAVE_RVV)
+#define SONIC_USING_ARCH_FUNC(func) using rvv::func
+#define INCLUDE_ARCH_FILE(file) SONIC_STRINGIFY(rvv/file)
 #elif defined(SONIC_HAVE_RISCV)
 #define SONIC_USING_ARCH_FUNC(func) using riscv::func
 #define INCLUDE_ARCH_FILE(file) SONIC_STRINGIFY(riscv/file)
@@ -53,6 +56,9 @@
 #elif defined(SONIC_HAVE_NEON)
 #define SONIC_USING_ARCH_FUNC(func) using neon::func
 #define INCLUDE_ARCH_FILE(file) SONIC_STRINGIFY(neon/file)
+#elif defined(SONIC_HAVE_RVV)
+#define SONIC_USING_ARCH_FUNC(func) using rvv::func
+#define INCLUDE_ARCH_FILE(file) SONIC_STRINGIFY(rvv/file)
 #elif defined(SONIC_HAVE_RISCV)
 #define SONIC_USING_ARCH_FUNC(func) using riscv::func
 #define INCLUDE_ARCH_FILE(file) SONIC_STRINGIFY(riscv/file)
